@@ -1,0 +1,109 @@
+#!/usr/bin/env python
+import pybedtools as pb
+import sys
+import os
+
+###################################################################################################################################################################################
+
+# Create a union of all ATAC peaks
+atac_peaks = []
+
+# Define path to where the ATAC-Seq bed files are stored
+path = "bed_files/ATACseq"
+
+for fname in os.listdir(path):
+    if not fname.endswith(".bed"):
+        continue
+        
+    fname = os.path.join(path, fname)
+    peaks = open(fname, "r").read().splitlines()
+    atac_peaks += peaks
+
+# Merge peaks
+atac_peaks_merged = pb.BedTool(atac_peaks).sort().merge()
+
+# Resize merged peaks to 400bp
+atac_peak_union = []
+
+for peak in atac_peaks_merged:
+    chrom = peak[0]
+    summit = (int(peak[1]) + int(peak[2])) // 2 
+    atac_peak_union.append(f"{chrom}\t{summit - 200}\t{summit + 200}")
+    
+# Convert to a pybedtools object
+atac_peak_union = pb.BedTool(atac_peak_union).sort()
+sys.stdout.write(f"Read {atac_peak_union.count()} peaks from ATAC-Seq files\n")
+
+###################################################################################################################################################################################
+
+# Read BED files for ChIP-seq datasets and filter against ATAC sites
+def filter_chip_peaks(fname = None, atac_peaks = None):
+    sample_id = os.path.basename(fname)
+    chip_peaks = pb.BedTool(fname).sort()
+    chip_peaks_filtered = chip_peaks.intersect(atac_peaks, wa = True, u = True)
+    
+    sys.stdout.write(f"Reading peaks from {sample_id}\n")
+    sys.stdout.write(f"\tRead {chip_peaks.count()} peaks\n")
+    sys.stdout.write(f"\tKept {chip_peaks_filtered.count()} peaks after filtering against ATAC sites\n")
+    
+    return chip_peaks_filtered
+
+runx1_0Dox_chip = filter_chip_peaks(fname = "bed_files/ChIPseq/RUNX1.0Dox.ChIP.extended.chr.bl.bed", atac_peaks = atac_peak_union)
+runx1_5Dox_chip = filter_chip_peaks(fname = "bed_files/ChIPseq/RUNX1.5Dox.ChIP.extended.chr.bl.bed", atac_peaks = atac_peak_union)
+reto_5Dox_chip = filter_chip_peaks(fname = "bed_files/ChIPseq/RUNX1-ETO.5Dox.ChIP.extended.chr.bl.bed", atac_peaks = atac_peak_union)
+
+# Define a common set of coordinates for all ChIP peaks
+chip_peak_union = []
+chip_peak_union += ["\t".join(x) for x in runx1_0Dox_chip]
+chip_peak_union += ["\t".join(x) for x in runx1_5Dox_chip]
+chip_peak_union += ["\t".join(x) for x in reto_5Dox_chip]
+
+chip_peak_union = pb.BedTool(chip_peak_union).sort().merge()
+
+# Align all chip peaks to this new set of coordinates
+runx1_0Dox_chip = chip_peak_union.intersect(runx1_0Dox_chip, wa = True, u = True)
+runx1_5Dox_chip = chip_peak_union.intersect(runx1_5Dox_chip, wa = True, u = True)
+reto_5Dox_chip = chip_peak_union.intersect(reto_5Dox_chip, wa = True, u = True)
+
+###################################################################################################################################################################################
+
+# Bound by all three factors
+bound_by_all_three = runx1_0Dox_chip.intersect(runx1_5Dox_chip, wa = True, u = True).intersect(reto_5Dox_chip, wa = True, u = True)
+sys.stdout.write(f"Found {bound_by_all_three.count()} sites bound by all three factors\n")
+
+# RUNX1 maintained
+runx1_maintained = runx1_0Dox_chip.intersect(runx1_5Dox_chip, wa = True, u = True).intersect(reto_5Dox_chip, v = True)
+sys.stdout.write(f"Found {runx1_maintained.count()} sites that maintain RUNX1 binding, but do not gain RUNX1-ETO\n")
+
+# RUNX1 Lost
+runx1_lost = runx1_0Dox_chip.intersect(runx1_5Dox_chip, v = True).intersect(reto_5Dox_chip, v = True)
+sys.stdout.write(f"Found {runx1_lost.count()} sites that lost RUNX1 binding, but do not gain RUNX1-ETO\n")
+
+# RUNX1 Replaced
+runx1_replaced = reto_5Dox_chip.intersect(runx1_0Dox_chip, wa = True, u = True).intersect(runx1_5Dox_chip, v = True)
+sys.stdout.write(f"Found {runx1_replaced.count()} sites where RUNX1 was replaced by RUNX1-ETO\n")
+
+# RUNX1-ETO gained
+reto_gained = reto_5Dox_chip.intersect(runx1_0Dox_chip, v = True).intersect(runx1_5Dox_chip, v = True)
+sys.stdout.write(f"Found {reto_gained.count()} new sites that were bound by RUNX1-ETO\n")
+
+# RUNX1 and RUNX1-ETO gained
+runx1_reto_gained = reto_5Dox_chip.intersect(runx1_5Dox_chip, wa = True, u = True).intersect(runx1_0Dox_chip, v = True)
+sys.stdout.write(f"Found {runx1_reto_gained.count()} new sites that were bound by RUNX1 and RUNX1-ETO after dox treatment\n")
+
+# RUNX1 gained without RUNX1-ETO
+runx1_gained_without_reto = runx1_5Dox_chip.intersect(runx1_0Dox_chip, v = True).intersect(reto_5Dox_chip, v = True)
+sys.stdout.write(f"Found {runx1_gained_without_reto.count()} new sites that gained RUNX1, but nor RUNX1-ETO after dox treatment\n")
+
+###################################################################################################################################################################################
+
+# Write peak sets to file
+bound_by_all_three.saveas("peak_sets/RUNX1_maintained_with_REto.bed")
+runx1_maintained.saveas("peak_sets/RUNX1_maintained_without_REto.bed")
+runx1_lost.saveas("peak_sets/RUNX1_lost.bed")
+runx1_replaced.saveas("peak_sets/RUNX1_replaced.bed")
+reto_gained.saveas("peak_sets/REto_gained.bed")
+runx1_reto_gained.saveas("peak_sets/RUNX1_and_REto_gained.bed")
+runx1_gained_without_reto.saveas("peak_sets/RUNX1_gained_without_REto.bed")
+
+###################################################################################################################################################################################
