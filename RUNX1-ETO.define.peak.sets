@@ -1,3 +1,6 @@
+# Script written by Dr Peter Keane
+
+
 #!/usr/bin/env python
 import pybedtools as pb
 import sys
