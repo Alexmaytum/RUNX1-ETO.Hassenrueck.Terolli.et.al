@@ -1,0 +1,264 @@
+library(Seurat)
+library(ggplot2)
+library(tidyverse)
+library(enrichR)
+
+###########################################################################################################################################
+
+# Read single cell dataset and keep only 0 and 5 dox samples
+cells<- readRDS(file = 'KT29Subset.rds') %>% subset(dox %in% c('dox0', 'dox10'))
+
+#Set idents to called seurat clusters
+cells<- SetIdent(object = cells, value = cells@meta.data$seurat_clusters)
+
+# Get marker genes for clusters 1 vs. 6 only
+markers<- FindMarkers(object = cells, ident.1 = 4, ident.2 = 1, min.pct = 0.1)
+
+# Get up and down-regulated genes
+genes.up<- markers %>% filter(p_val_adj < 0.01 & avg_log2FC > log2(2)) %>% rownames()
+genes.down<- markers %>% filter(p_val_adj < 0.01 & avg_log2FC < -log2(2)) %>% rownames()
+
+# Write DE genes with fold-changes and p-values to output file
+markers.out<- markers %>% mutate(GeneID = rownames(markers))
+markers.out<- markers.out[,c(6, 3, 4, 1, 5, 2)]
+
+markers.out<- markers.out %>% arrange(desc(avg_log2FC))
+
+# Write all genes
+write.table(markers.out, file = 'binding_analysis/Dox10_all_DE_genes.tsv', sep = '\t', row.names = FALSE, quote = FALSE)
+
+# Write only DE genes
+markers.out.de<- markers.out %>% filter(abs(avg_log2FC) > 1 & p_val_adj < 0.01)
+write.table(markers.out.de, file = 'binding_analysis/Dox10_DE_genes.tsv', sep = '\t', quote = FALSE, row.names = FALSE)
+
+# Plot cells
+g<- DimPlot(cells, group.by = 'seurat_clusters') +
+  xlab('UMAP 1') + 
+  ylab('UMAP 2') +
+  ggtitle(label = '') +
+  theme(axis.title = element_text(size = 24)) +
+  theme(axis.text = element_text(size = 24)) +
+  theme(legend.position = 'none') +
+  theme(axis.line = element_line(linewidth = 1)) +
+  theme(axis.ticks = element_line(linewidth = 1), axis.ticks.length = unit(0.25, 'cm')) +
+  scale_colour_manual(values = c('grey70', '#0000DD', 'grey70', 'grey70', '#DD0000', 'grey70', 'grey70', 'grey70', 'grey70')) +
+  scale_x_continuous(limits = c(-10.5,10.5), breaks = seq(-10,10,5)) +
+  scale_y_continuous(limits = c(-10.5,10.5), breaks = seq(-10,10,5))
+
+ggsave(g, file = 'binding_analysis/Dox10_UMAP_highlighted.png', bg = 'white', height = 8, width = 8.5, units = 'in', dpi = 800)
+ggsave(g, file = 'binding_analysis/Dox10_UMAP_highlighted.pdf', bg = 'white', height = 8, width = 8.5, units = 'in', dpi = 800)
+
+# Volcano plot
+de<- rep('', nrow(markers))
+de[rownames(markers) %in% genes.up]<- 'Up'
+de[rownames(markers) %in% genes.down]<- 'Down'
+markers<- mutate(markers, DE = factor(de, levels = c('Up', 'Down', '')))
+
+g<- ggplot(markers, aes(x = avg_log2FC, y = -log10(p_val_adj), color = DE)) + geom_point() + theme_classic() +
+  geom_vline(xintercept = c(-1,1), lty = 'dashed', lwd = 1) +
+  geom_hline(yintercept = -log10(0.01), lty = 'dashed', lwd = 1) + 
+  scale_color_manual(values = c('#DD0000', '#0000DD', 'grey70')) + 
+  scale_y_continuous(breaks = seq(0,300,50), limits = c(0,320)) + 
+  scale_x_continuous(breaks = seq(-10,10,2), limits = c(-10,10)) + 
+  xlab(expression(paste('log'[2]*'(fold-change)'))) + 
+  ylab(expression(paste('-log'[10]*'(Adj.P-Value)'))) +
+  theme(legend.position = 'none') + 
+  theme(axis.line = element_line(linewidth = 1)) + 
+  theme(axis.ticks = element_line(linewidth = 1), axis.ticks.length = unit(0.25, 'cm')) +
+  theme(axis.title = element_text(size = 22), axis.text = element_text(size = 22))
+
+ggsave(g, file = 'binding_analysis/Dox10_VolcanoPlot.png', bg = 'white', height = 8, width = 9, units = 'in', dpi = 800)
+ggsave(g, file = 'binding_analysis/Dox10_VolcanoPlot.pdf', bg = 'white', height = 8, width = 9, units = 'in', dpi = 800)
+
+###########################################################################################################################################
+
+# Read ChIP groups
+runx1_replaced<- scan('binding_analysis/gene_lists/RUNX1_replaced_genes.txt', what = 'character')
+runx1_lost<- scan('binding_analysis/gene_lists/RUNX1_lost_genes.txt', what = 'character')
+runx1_maintained_with_reto<- scan('binding_analysis/gene_lists/RUNX1_maintained_with_REto_genes.txt', what = 'character')
+runx1_maintained_without_reto<- scan('binding_analysis/gene_lists/RUNX1_maintained_without_REto_genes.txt', what = 'character')
+runx1_and_reto_gained<- scan('binding_analysis/gene_lists/RUNX1_and_REto_gained_genes.txt', what = 'character')
+reto_gained<- scan('binding_analysis/gene_lists/REto_gained_genes.txt', what = 'character')
+runx1_gained_without_reto<- scan('binding_analysis/gene_lists/RUNX1_gained_without_REto_genes.txt', what = 'character')
+
+calculate_fisher_test<- function(chip_targets, marker_genes, universe){
+  chip_targets<- intersect(chip_targets, universe)
+  marker_genes<- intersect(marker_genes, universe)
+  
+  a<- length(intersect(chip_targets, marker_genes))
+  b<- length(chip_targets) - a
+  c<- length(marker_genes) - a
+  d<- length(universe) - a - b - c
+  
+  m<- matrix(c(a, b, c, d), nrow = 2)
+  result<- fisher.test(m, alternative = 'greater')
+  result<- as.vector(c(result$p.value, result$estimate, a))
+  return(result)
+}
+
+###########################################################################################################################################
+
+runx1_replaced.up<- calculate_fisher_test(chip_targets = runx1_replaced, marker_genes = genes.up, universe = rownames(markers))
+runx1_lost.up<- calculate_fisher_test(chip_targets = runx1_lost, marker_genes = genes.up, universe = rownames(markers))
+runx1_maintained_with_reto.up<- calculate_fisher_test(chip_targets = runx1_maintained_with_reto, marker_genes = genes.up, universe = rownames(markers))
+runx1_maintained_without_reto.up<- calculate_fisher_test(chip_targets = runx1_maintained_without_reto, marker_genes = genes.up, universe = rownames(markers))
+runx1_and_reto_gained.up<- calculate_fisher_test(chip_targets = runx1_and_reto_gained, marker_genes = genes.up, universe = rownames(markers))
+reto_gained.up<- calculate_fisher_test(chip_targets = reto_gained, marker_genes = genes.up, universe = rownames(markers))
+runx1_gained_without_reto.up<- calculate_fisher_test(chip_targets = runx1_gained_without_reto, marker_genes = genes.up, universe = rownames(markers))
+
+results.up<- rbind(runx1_replaced.up, 
+                   runx1_lost.up, 
+                   runx1_maintained_with_reto.up, 
+                   runx1_maintained_without_reto.up, 
+                   runx1_and_reto_gained.up, 
+                   reto_gained.up, 
+                   runx1_gained_without_reto.up)
+
+results.up<- as.data.frame(results.up)
+
+colnames(results.up)<- c('P.Value', "Odds.Ratio", "N_Genes")
+results.up<- results.up %>% mutate(Adj.P.Value = p.adjust(results.up$P.Value, method = 'BH'))
+results.up<- results.up %>% arrange(desc(Odds.Ratio))
+
+###########################################################################################################################################
+
+runx1_replaced.down<- calculate_fisher_test(chip_targets = runx1_replaced, marker_genes = genes.down, universe = rownames(markers))
+runx1_lost.down<- calculate_fisher_test(chip_targets = runx1_lost, marker_genes = genes.down, universe = rownames(markers))
+runx1_maintained_with_reto.down<- calculate_fisher_test(chip_targets = runx1_maintained_with_reto, marker_genes = genes.down, universe = rownames(markers))
+runx1_maintained_without_reto.down<- calculate_fisher_test(chip_targets = runx1_maintained_without_reto, marker_genes = genes.down, universe = rownames(markers))
+runx1_and_reto_gained.down<- calculate_fisher_test(chip_targets = runx1_and_reto_gained, marker_genes = genes.down, universe = rownames(markers))
+reto_gained.down<- calculate_fisher_test(chip_targets = reto_gained, marker_genes = genes.down, universe = rownames(markers))
+runx1_gained_without_reto.down<- calculate_fisher_test(chip_targets = runx1_gained_without_reto, marker_genes = genes.down, universe = rownames(markers))
+
+results.down<- rbind(runx1_replaced.down, 
+                     runx1_lost.down, 
+                     runx1_maintained_with_reto.down, 
+                     runx1_maintained_without_reto.down, 
+                     runx1_and_reto_gained.down, 
+                     reto_gained.down, 
+                     runx1_gained_without_reto.down)
+
+results.down<- as.data.frame(results.down)
+
+colnames(results.down)<- c('P.Value', "Odds.Ratio", "N_Genes")
+results.down<- results.down %>% mutate(Adj.P.Value = p.adjust(results.down$P.Value, method = 'BH'))
+results.down<- results.down %>% arrange(desc(Odds.Ratio))
+
+###########################################################################################################################################
+
+# Do KEGG pathway enrichment using enrichR
+all.genes<- rownames(markers)
+
+process_enrichr_results<- function(genes = NULL, background = NULL){
+  databases<- c('KEGG_2021_Human')
+  enrich.results<- enrichr(genes = genes, databases = databases, background = background)
+  enrich.results.kegg<- enrich.results$KEGG_2021_Human
+  
+  n_genes<- c()
+  
+  for(i in seq(1, nrow(enrich.results.kegg))){
+    n<- str_split(enrich.results.kegg$Genes[i], pattern = ';') %>% unlist() %>% length()
+    n_genes<- c(n_genes, n)
+  }
+  
+  enrich.results.kegg<- mutate(enrich.results.kegg, n_genes = n_genes)
+  enrich.results.kegg<- filter(enrich.results.kegg, Adjusted.P.value < 0.05)
+  enrich.results.kegg<- select(enrich.results.kegg, Term, Odds.Ratio, P.value, Adjusted.P.value, n_genes, Genes)
+  
+  # Sort genes by alphabetical order
+  genes<- lapply(enrich.results.kegg$Genes, function(x){
+    gene_split<- strsplit(x, split = ";") %>% unlist()
+    gene_split<- sort(gene_split)
+    gene_join<- paste(gene_split, collapse = ", ")
+    return(gene_join)
+  }) %>% unlist()
+  
+  enrich.results.kegg$Genes<- genes
+  
+  return(enrich.results.kegg)
+}
+
+# KEGG pathway analysis for RUNX1 Lost genes which are down-regulated
+runx1_lost.downReg<- intersect(runx1_lost, genes.down)
+runx1_lost.downReg.KEGG<- process_enrichr_results(genes = runx1_lost.downReg, background = all.genes)
+
+# KEGG pathway analysis for RUNX1-ETO Gained genes which are up-regulated
+reto_gained.upReg<- intersect(reto_gained, genes.up)
+reto_gained.upReg.KEGG<- process_enrichr_results(genes = reto_gained.upReg, background = all.genes)
+
+###########################################################################################################################################
+
+# Plot fisher test results
+categroies<- gsub(rownames(results.up), pattern = '.up', replacement = '')
+results.up<- mutate(results.up, Set = categroies, Type = "Up-Regulated")
+
+categroies<- gsub(rownames(results.down), pattern = '.down', replacement = '')
+results.down<- mutate(results.down, Set = categroies, Type = "Down-Regulated")
+
+results<- rbind(results.up, results.down)
+results$Type<- factor(results$Type, levels = c('Up-Regulated', 'Down-Regulated'))
+
+# Re-name peak sets to something more legible
+results$Set[results$Set == 'reto_gained']<- 'RUNX1-ETO Gained'
+results$Set[results$Set == 'runx1_lost']<- 'RUNX1 Lost'
+results$Set[results$Set == 'runx1_replaced']<- 'RUNX1 Replaced'
+results$Set[results$Set == 'runx1_maintained_with_reto']<- 'RUNX1 Maintained with RUNX1-ETO'
+results$Set[results$Set == 'runx1_maintained_without_reto']<- 'RUNX1 Maintained without RUNX1-ETO'
+results$Set[results$Set == 'runx1_and_reto_gained']<- 'RUNX1 and RUNX1-ETO Gained'
+results$Set[results$Set == 'runx1_gained_without_reto']<- 'RUNX1 Gained without RUNX1-ETO'
+
+# Order by number of genes
+results.longer<- results %>% mutate(name = Type, value = Odds.Ratio) %>% pivot_wider(id_cols = Set) %>% as.data.frame()
+results.longer<- mutate(results.longer, Max = apply(results.longer[,2:3], 1, max))
+results.longer<- arrange(results.longer, Max)
+
+results$Set<- factor(results$Set, levels = results.longer$Set)
+
+g<- ggplot(results, aes(x = Type, y = Set, size = N_Genes, color = -log10(Adj.P.Value))) + geom_point() + theme_minimal() + 
+  scale_color_gradient(low = 'grey70', high = '#DD0000', name = expression(paste('-log'[10]*'(Adj.P-Value)'))) +
+  scale_size(name = 'No. of Genes') +  
+  theme(axis.title = element_blank(), axis.text.y = element_text(size = 16), axis.text.x = element_text(size = 16, angle = 30, hjust = 1)) +
+  theme(legend.title = element_text(size = 12), legend.text = element_text(size = 12))
+
+ggsave(g, file = 'binding_analysis/Dox10_Fisher_test_results.png', bg = 'white', width = 8, height = 5, units = 'in', dpi = 800)  
+ggsave(g, file = 'binding_analysis/Dox10_Fisher_test_results.pdf', bg = 'white', width = 8, height = 5, units = 'in', dpi = 800)
+
+###########################################################################################################################################
+
+# Write tables
+results.up<- results %>% filter(Type == 'Up-Regulated') %>% select(Set, Odds.Ratio, N_Genes, P.Value, Adj.P.Value)
+results.down<- results %>% filter(Type == 'Down-Regulated') %>% select(Set, Odds.Ratio, N_Genes, P.Value, Adj.P.Value)
+
+write.table(results.up, file = 'binding_analysis/Dox10_UpRegulated_Fisher_test_results.tsv', sep = '\t', quote = FALSE, row.names = FALSE)
+write.table(results.down, file = 'binding_analysis/Dox10_DownRegulated_Fisher_test_results.tsv', sep = '\t', quote = FALSE, row.names = FALSE)
+
+write.table(runx1_lost.downReg.KEGG, file = 'binding_analysis/KEGG/Dox10_RUNX1_Lost_DownRegulated_KEGG.tsv', sep = '\t', quote = FALSE, row.names = FALSE)
+write.table(reto_gained.upReg.KEGG, file = 'binding_analysis/KEGG/Dox10_RUNX1ETO_Gained_UpRegulated_KEGG.tsv', sep = '\t', quote = FALSE, row.names = FALSE)
+
+###########################################################################################################################################
+
+runx1_lost.downReg.KEGG<- arrange(runx1_lost.downReg.KEGG, n_genes)
+runx1_lost.downReg.KEGG$Term<- factor(runx1_lost.downReg.KEGG$Term, levels = runx1_lost.downReg.KEGG$Term)
+
+g<- ggplot(runx1_lost.downReg.KEGG, aes(x = n_genes, y = Term)) + geom_bar(stat = 'identity') + theme_classic() +
+  xlab('No. of genes') + 
+  theme(axis.line.y = element_blank(), axis.ticks.y = element_blank()) +
+  theme(axis.line.x = element_line(linewidth = 1), axis.ticks.x = element_line(linewidth = 1), axis.ticks.length.x = unit(0.25, 'cm')) +
+  theme(axis.title.y = element_blank(), axis.title.x = element_text(size = 18), axis.text = element_text(size = 16),)
+  
+ggsave(g, file = 'binding_analysis/KEGG/Dox10_RUNX1_Lost_DownRegulated_KEGG.png', height = 4, width = 8, dpi = 800, unit = 'in')
+ggsave(g, file = 'binding_analysis/KEGG/Dox10_RUNX1_Lost_DownRegulated_KEGG.pdf', height = 4, width = 8, dpi = 800, unit = 'in')
+
+reto_gained.upReg.KEGG<- arrange(reto_gained.upReg.KEGG, n_genes)
+reto_gained.upReg.KEGG$Term<- factor(reto_gained.upReg.KEGG$Term, levels = reto_gained.upReg.KEGG$Term)
+
+g<- ggplot(reto_gained.upReg.KEGG, aes(x = n_genes, y = Term)) + geom_bar(stat = 'identity') + theme_classic() +
+  xlab('No. of genes') + 
+  theme(axis.line.y = element_blank(), axis.ticks.y = element_blank()) +
+  theme(axis.line.x = element_line(linewidth = 1), axis.ticks.x = element_line(linewidth = 1), axis.ticks.length.x = unit(0.25, 'cm')) +
+  theme(axis.title.y = element_blank(), axis.title.x = element_text(size = 18), axis.text = element_text(size = 16),)
+
+ggsave(g, file = 'binding_analysis/KEGG/Dox10_RUNX1ETO_Gained_UpRegulated_KEGG.png', height = 4, width = 8, dpi = 800, unit = 'in')
+ggsave(g, file = 'binding_analysis/KEGG/Dox10_RUNX1ETO_Gained_UpRegulated_KEGG.pdf', height = 4, width = 8, dpi = 800, unit = 'in')
+
+###########################################################################################################################################
